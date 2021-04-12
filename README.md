@@ -7,7 +7,7 @@ based on ![Azure Media Services v3 Node samples](https://github.com/Azure-Sample
 Clone from github
 
 ~~~~pwsh
-PS C:\> git clone 
+PS C:\> git clone https://github.com/cpinotossi/az-ams-live.git
 ~~~~
 
 Install Node Modules
@@ -75,3 +75,4 @@ Note: When you restart the program, you need to associate it with a new asset an
 
 - ![Starting 2021 With the Latest and Greatest Features of Azure Video Indexer](https://techcommunity.microsoft.com/t5/azure-media-services/starting-2021-with-the-latest-and-greatest-features-of-azure/ba-p/2179152)
 - ![Media Services pricing](https://azure.microsoft.com/en-us/pricing/details/media-services/)
+- ![Stream-level events](https://docs.microsoft.com/en-us/azure/media-services/latest/monitoring/media-services-event-schemas#stream-level-events)
