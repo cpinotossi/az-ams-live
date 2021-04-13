@@ -4,14 +4,17 @@
 import * as msRestNodeAuth from "@azure/ms-rest-nodeauth";
 import { AzureMediaServices } from '@azure/arm-mediaservices';
 import { v4 as uuidv4 } from 'uuid';
+import { v1 as uuidv1 } from 'uuid';
+import {randomBytes as crypto} from 'crypto';
 import { AzureMediaServicesOptions, IPRange, LiveEvent, LiveEventInputAccessControl, LiveEventPreview, LiveOutput, MediaservicesGetResponse } from "@azure/arm-mediaservices/esm/models";
 
 // Load the .env file if it exists
 import * as dotenv from "dotenv";
 dotenv.config();
 
-import { Command } from 'commander';
-import { LiveEventPreviewAccessControl } from "@azure/arm-mediaservices/esm/models/mappers";
+import { Command, exitOverride } from 'commander';
+import { LiveEventPreviewAccessControl, SystemData } from "@azure/arm-mediaservices/esm/models/mappers";
+import { systemErrorRetryPolicy } from "@azure/ms-rest-js";
 const program = new Command();
 
 // from your Media Services account's API Access page in the Azure portal.
@@ -36,7 +39,7 @@ export async function main() {
     .action(function (path: String, cmdInstance: Command) {
       let options = cmdInstance.opts();
       let p = path;
-      setMaxStandbyLiveEvent();
+      setMaxStandByLiveEvent();
     });
 
   program.command('list') // sub-command name
@@ -58,9 +61,9 @@ export async function main() {
       let options = cmdInstance.opts();
       let p = path;
       console.log('%s %s', options.name, '/ ' + options.state, '/ ' + options.all);
-      if(options.all){
+      if (options.all) {
         setStateLiveEventAll(options.state);
-      }else{
+      } else {
         setStateLiveEvent(options.name, options.state);
       }
     });
@@ -89,9 +92,9 @@ export async function main() {
       let options = cmdInstance.opts();
       let p = path;
       console.log('%s %s', options.name, options.all);
-      if(options.all){
+      if (options.all) {
         deleteLiveEventAll();
-      }else{
+      } else {
         deleteLiveEvent(options.name);
       }
     });
@@ -110,6 +113,32 @@ export async function main() {
       //console.log('%s %s', cmdInstance.current, '/ '+ cmdInstance.new);
       console.log('%s %s %s', options.name, '/ ' + options.prefix, '/ ' + options.token);
       updateLiveEvent(options.name, options.prefix, options.token);
+    });
+
+    program.command('assign') // sub-command name
+    .alias('as') // alternative sub-command is `ls`
+    .description('Assign AMS Live Events to User') // command description
+    .option('-n ,--name <type>', 'Live Event Name')
+    .option('-p ,--prefix <type>', 'Hostname Prefix')
+    .option('-t ,--token <type>', 'Access Token')
+    // function to execute when command is uses
+    .action(function (path: String, cmdInstance: Command) {
+      let options = cmdInstance.opts();
+      let p = path;
+      //console.log(options);
+      //console.log('%s %s', cmdInstance.current, '/ '+ cmdInstance.new);
+      console.log('%s %s %s', options.name, '/ ' + options.prefix, '/ ' + options.token);
+      assignLiveEventStandby(options.name, options.prefix, options.token);
+    });
+
+    program.command('test') // sub-command name
+    .alias('ts') // alternative sub-command is `ls`
+    .description('Test') // command description
+    // function to execute when command is uses
+    .action(function (path: String, cmdInstance: Command) {
+      let options = cmdInstance.opts();
+      let p = path;
+      test();
     });
 
   program.parse();
@@ -131,9 +160,9 @@ async function listLiveEvent() {
   const mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
 
   // List Live Events
-  var assets = await mediaClient.assets.list(resourceGroup, accountName);
+  // var assets = await mediaClient.assets.list(resourceGroup, accountName);
   var liveEvents = await mediaClient.liveEvents.list(resourceGroup, accountName);
-  console.log('Name\t\t| State\t\t| Prefix\t| Token')
+  console.log('Name\t\t\t\t\t| State\t\t| Prefix\t| Token')
   liveEvents.forEach(liveEvent => {
     console.log('%s %s %s %s', liveEvent.name + '\t|', liveEvent.resourceState + '\t|', liveEvent.hostnamePrefix + '\t\t|', liveEvent.input.accessToken);
     //console.log("LiveEvent:"+ liveEvent.name+"\tStatus:"+liveEvent.resourceState)
@@ -143,13 +172,15 @@ async function listLiveEvent() {
         console.log(JSON.stringify(asset));
       });
   */
+  /*
   if (assets.odatanextLink) {
     console.log("There are more than 1000 assets in this account, use the assets.listNext() method to continue listing more assets if needed")
     console.log("For example:  assets = await mediaClient.assets.listNext(assets.odatanextLink)");
   }
+  */
 }
 
-async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: string, accessToken: string) {
+async function updateLiveEvent(liveEventName: string, liveEventPrefix: string, accessToken: string) {
 
   // Retrieve an Azure Media Service instance
   let clientOptions: AzureMediaServicesOptions = {
@@ -162,17 +193,17 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   let liveEvent = await mediaClient.liveEvents.get(
     resourceGroup,
     accountName,
-    liveEventNameCurrent
+    liveEventName
   );
 
-  // TODO: Need to change to Standby instead of Stop
+  // We cannot modify an LiveEvent in state Running
   if (liveEvent.resourceState == "Running") {
-    console.info(`Need to stop running Live Event %s`,liveEventNameCurrent );
+    console.info(`Need to stop running Live Event %s`, liveEventName);
     let timeStartStop = process.hrtime();
     let stopOperation = await mediaClient.liveEvents.beginStop(
       resourceGroup,
       accountName,
-      liveEventNameCurrent,
+      liveEventName,
       {
         // It can be faster to delete all live outputs first, and then delete the live event. 
         // if you have additional workflows on the archive to run. Speeds things up!
@@ -181,10 +212,9 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
     );
     await stopOperation.pollUntilFinished();
     let timeEndStop = process.hrtime(timeStartStop);
-    console.info(`Execution time to Stop Live Event %s: %ds %dms`, liveEventNameCurrent, timeEndStop[0], timeEndStop[1] / 1000000);
+    console.info(`Execution time to Stop Live Event %s: %ds %dms`, liveEventName, timeEndStop[0], timeEndStop[1] / 1000000);
   }
 
-  // Modify hostnamePrefix in Stopped state. 
   // With the Channel stopped I should be able to update a few things as needed...
   liveEvent.input.accessToken = accessToken; //"0eebebb0-7ce8-42b7-954a-e3553e810379";
   // Assign the new live Event Name to the hostnamePrefix setting:
@@ -193,7 +223,7 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   let liveEventUpdateOperation = await mediaClient.liveEvents.beginUpdate(
     resourceGroup,
     accountName,
-    liveEventNameCurrent,
+    liveEventName,
     liveEvent
   );
   let updateresponse = await liveEventUpdateOperation.pollUntilFinished();
@@ -204,7 +234,7 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   let liveEventStartOperation = await mediaClient.liveEvents.beginStart(
     resourceGroup,
     accountName,
-    liveEventNameCurrent
+    liveEventName
   );
   console.log(`Live Event Start - HTTP Response Status: ${liveEventStartOperation.getInitialResponse().status}`);
   //console.log(liveEventStartOperation.getInitialResponse().parsedBody);
@@ -215,14 +245,14 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   // Poll until this long running operation has finished.
   let response = await liveEventStartOperation.pollUntilFinished();
   let timeEndStart = process.hrtime(timeStartStart);
-  console.info(`Execution time for start Live Event %s: %ds %dms`, liveEventNameCurrent, timeEndStart[0], timeEndStart[1] / 1000000);
+  console.info(`Execution time for start Live Event %s: %ds %dms`, liveEventName, timeEndStart[0], timeEndStart[1] / 1000000);
   //console.log();
 
   // Refresh the liveEvent object's settings after starting it...
   liveEvent = await mediaClient.liveEvents.get(
     resourceGroup,
     accountName,
-    liveEventNameCurrent
+    liveEventName
   )
 
   // Get the RTMP ingest URL to configure in OBS Studio. 
@@ -241,13 +271,86 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
     // The preview endpoint URL also support the addition of various format strings for HLS (format=m3u8-cmaf) and DASH (format=mpd-time-cmaf) for example.
     // The default manifest is Smooth. 
     let previewEndpoint = liveEvent.preview.endpoints[0].url;
-    console.log("Preview url is: " + previewEndpoint);
+    // console.log("Preview url is: " + previewEndpoint);
     console.log("Preview via AMP: " + `https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
   }
 
   console.log("Start the live stream now, sending the input to the ingest url and verify that it is arriving with the preview url.");
   console.log("IMPORTANT TIP!: Make CERTAIN that the video is flowing to the Preview URL before continuing!");
   listLiveEvent();
+  console.log();
+}
+
+async function assignLiveEventStandby(liveEventName: string, liveEventPrefix: string, accessToken: string) {
+
+  // Retrieve an Azure Media Service instance
+  let clientOptions: AzureMediaServicesOptions = {
+    longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
+  }
+  const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
+  let mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
+
+  // Retrieve LiveEvent which does match to our input parameter current:
+  let liveEvent = await mediaClient.liveEvents.get(
+    resourceGroup,
+    accountName,
+    liveEventName
+  );
+
+  // We cannot modify an LiveEvent in state Running
+  if (liveEvent.resourceState == "StandBy" || liveEvent.resourceState == "Allocating") {
+    
+    // With the Channel stopped I should be able to update a few things as needed...
+    liveEvent.input.accessToken = accessToken; //"0eebebb0-7ce8-42b7-954a-e3553e810379";
+    // Assign the new live Event Name to the hostnamePrefix setting:
+    liveEvent.hostnamePrefix = liveEventPrefix;
+    // Calling update 
+    let liveEventUpdateOperation = await mediaClient.liveEvents.beginUpdate(
+      resourceGroup,
+      accountName,
+      liveEventName,
+      liveEvent
+    );
+    let updateresponse = await liveEventUpdateOperation.pollUntilFinished();
+
+    console.log(`Start Live Event %s operation... please stand by`,liveEventName);
+    let timeStartStart = process.hrtime();
+    // Start the Live Event - this will take some time...
+    let liveEventStartOperation = await mediaClient.liveEvents.beginStart(
+      resourceGroup,
+      accountName,
+      liveEventName
+    );
+    // console.log(`Live Event Start - HTTP Response Status: ${liveEventStartOperation.getInitialResponse().status}`);
+    // Poll until this long running operation has finished.
+    let response = await liveEventStartOperation.pollUntilFinished();
+    let timeEndStart = process.hrtime(timeStartStart);
+    console.info(`Execution Live Event %s: %ds %dms`, liveEventName, timeEndStart[0], timeEndStart[1] / 1000000);
+
+    // Refresh the liveEvent object's settings after starting it...
+    liveEvent = await mediaClient.liveEvents.get(
+      resourceGroup,
+      accountName,
+      liveEventName
+    )
+    if (liveEvent.input?.endpoints) {
+      let ingestUrl = liveEvent.input.endpoints[0].url;
+      console.log(`Ingest url: ${ingestUrl}`);
+    }
+
+    if (liveEvent.preview?.endpoints) {
+      let previewEndpoint = liveEvent.preview.endpoints[0].url;
+      console.log("Preview url is: " + previewEndpoint);
+      console.log("Preview via AMP: " + `https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
+    }
+
+    // console.log("Start the live stream now, sending the input to the ingest url and verify that it is arriving with the preview url.");
+    // console.log("IMPORTANT TIP!: Make CERTAIN that the video is flowing to the Preview URL before continuing!");
+  } else {
+    console.info(`Live Event %s is not in state Standby, current State: %s`, liveEventName, liveEvent.resourceState);
+  }
+  await setMaxStandByLiveEvent();
+  //await listLiveEvent();
   console.log();
 }
 
@@ -261,7 +364,7 @@ async function deleteLiveEventAll() {
 
   var liveEvents = await mediaClient.liveEvents.list(resourceGroup, accountName);
   liveEvents.forEach(liveEvent => {
-    if(liveEvent.name != null){
+    if (liveEvent.name != null) {
       deleteLiveEvent(liveEvent.name);
     }
   });
@@ -403,7 +506,7 @@ async function setStateLiveEvent(liveEventName: string, liveEventState: string) 
   console.log();
 }
 
-async function setMaxStandbyLiveEvent() {
+async function setMaxStandByLiveEvent() {
   //Init AzureMediaService Client
   let clientOptions: AzureMediaServicesOptions = {
     longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
@@ -414,24 +517,150 @@ async function setMaxStandbyLiveEvent() {
 
   // Count all Live Events in state standby
   let liveEvents = await mediaClient.liveEvents.list(resourceGroup, accountName);
-  let currentNumberofStandByLiveEvents: number = 0;
+  //let currentNumberofStandByLiveEvents: number = 0;
+  let liveEventsStandByArry = [];
   liveEvents.forEach(liveEvent => {
     if (liveEvent.resourceState == "StandBy" || liveEvent.resourceState == "Allocating") {
-      currentNumberofStandByLiveEvents++;
+      liveEventsStandByArry.push(liveEvent);
+      //currentNumberofStandByLiveEvents++;
     }
   });
-  console.log(`Current No of Standby LiveEvents: %s Max Number: %s`, currentNumberofStandByLiveEvents, maxStandbyLiveEvents);
+  console.log(`Current No of Standby LiveEvents: %s Max Number: %s`, liveEventsStandByArry.length, maxStandbyLiveEvents);
   //
-  if(currentNumberofStandByLiveEvents < maxStandbyLiveEvents){
-    let diffStandByLiveEvents = maxStandbyLiveEvents - currentNumberofStandByLiveEvents;
-    for(var i:number = 1; i<=diffStandByLiveEvents; i++){
-      let numberlabel = currentNumberofStandByLiveEvents + i;
-      console.log(`sbstream:`+ numberlabel + ` user:`+numberlabel)
-      await createLiveEvent(`sbstream`+numberlabel, `user`+numberlabel);
-      await setStateLiveEvent(`sbstream`+numberlabel,`standby`);
-   }
+  if (liveEventsStandByArry.length < maxStandbyLiveEvents) {
+    let diffStandByLiveEvents = maxStandbyLiveEvents - liveEventsStandByArry.length;
+    while(liveEventsStandByArry.length < maxStandbyLiveEvents){
+      let numberlabel = liveEventsStandByArry.length + 1;
+      // console.log(`numberlabel: %s`, numberlabel);
+      // console.log(`create sbstream:` + numberlabel + ` user:` + numberlabel)
+      //LiveEvent Name max length 32
+      let newLiveEventStandBy:LiveEvent = await createLiveEventStandBy(uuidv4().replace(/-/g,''), `user` + numberlabel);
+      liveEventsStandByArry.push(newLiveEventStandBy);
+    }
   }
-  
+}
+
+async function createLiveEventStandBy(liveEventName: string, liveEventPrefix: string) {
+  // Create Access Token from Name
+  let accessToken = uuidv4();
+  // Retrieve an Azure Media Service instance
+  let clientOptions: AzureMediaServicesOptions = {
+    longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
+  }
+  const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
+  let mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
+
+  // Get the media services account object for information on the current location. 
+  let mediaAccount: MediaservicesGetResponse;
+  mediaAccount = await mediaClient.mediaservices.get(resourceGroup, accountName);
+
+  // Define LiveEvent Config Objects
+  let allowAllInputRange: IPRange = {
+    name: "AllowAll",
+    address: "0.0.0.0",
+    subnetPrefixLength: 0
+  };
+  // Create the LiveEvent input IP access control object
+  // this will control the IP that the encoder is running on and restrict access to only that encoder IP range.
+  let liveEventInputAccess: LiveEventInputAccessControl = {
+    ip: {
+      allow: [
+        allowAllInputRange
+      ]
+    }
+  };
+
+  // Create the LiveEvent Preview IP access control object. 
+  // This will restrict which clients can view the preview endpoint
+  let liveEventPreview: LiveEventPreview = {
+    accessControl: {
+      ip: {
+        allow: [
+          allowAllInputRange
+        ]
+      }
+    }
+  }
+
+  let liveEventCreate: LiveEvent = {
+    location: mediaAccount.location,
+    description: liveEventName,
+    // Set useStaticHostname to true to make the ingest and preview URL host name the same. 
+    // This can slow things down a bit. 
+    useStaticHostname: true,
+    hostnamePrefix: liveEventPrefix, /// When using Static host name true, you can control the host prefix name here if desired 
+    // 1) Set up the input settings for the Live event...
+    input: {
+      streamingProtocol: "RTMP", // options are RTMP or Smooth Streaming ingest format.
+      accessControl: liveEventInputAccess,  // controls the IP restriction for the source encoder. 
+      accessToken: accessToken // Use this value when you want to make sure the ingest URL is static and always the same. If omitted, the service will generate a random GUID value.
+    },
+
+    // 2) Set the live event to use pass-through or cloud encoding modes...
+    encoding: {
+      encodingType: "None",
+    },
+    // 3) Set up the Preview endpoint for monitoring based on the settings above we already set. 
+    preview: liveEventPreview,
+
+    // 4) Set up more advanced options on the live event. Low Latency is the most common one. 
+    streamOptions: [
+      "LowLatency"
+    ],
+
+  }
+
+  let timeStart = process.hrtime();
+  let liveCreateOperation = await mediaClient.liveEvents.beginCreate(
+    resourceGroup,
+    accountName,
+    liveEventName,
+    liveEventCreate,
+    {
+      autoStart: false
+    }
+  );
+
+  // Make sure that the Live event is created
+  if (!liveCreateOperation.isFinished()) {
+    await liveCreateOperation.pollUntilFinished();
+  }
+  let timeEnd = process.hrtime(timeStart);
+  console.info(`Create Live Event %s, execution time: %ds %dms`,liveEventName, timeEnd[0], timeEnd[1] / 1000000);
+
+  timeStart = process.hrtime();
+  // Allocate the Live Event - this will take some time...
+  let liveEventStandByOperation = await mediaClient.liveEvents.beginAllocate(
+    resourceGroup,
+    accountName,
+    liveEventName
+  );
+
+  let response = await liveEventStandByOperation.pollUntilFinished();
+  timeEnd = process.hrtime(timeStart);
+  console.info(`Allocate Live Event %s, execution time : %ds %dms`, liveEventName, timeEnd[0], timeEnd[1] / 1000000);
+  //console.log();
+
+  // Refresh the liveEvent object's settings after starting it...
+  let liveEvent = await mediaClient.liveEvents.get(
+    resourceGroup,
+    accountName,
+    liveEventName
+  )
+
+  if (liveEvent.input?.endpoints) {
+    let ingestUrl = liveEvent.input.endpoints[0].url;
+    console.log(`Ingest URL : ${ingestUrl}`);
+  }
+
+  if (liveEvent.preview?.endpoints) {
+    let previewEndpoint = liveEvent.preview.endpoints[0].url;
+    //console.log("Preview url is: " + previewEndpoint);
+    //console.log("Preview via AMP: " + `https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
+  }
+  await listLiveEvent();
+  console.log();
+  return liveEvent;
 }
 
 async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
@@ -675,4 +904,16 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
   }
   listLiveEvent();
   console.log();
+}
+
+async function test(){
+  // Create Access Token from Name
+  let accessToken = uuidv4();
+  let i:number = 0;
+  //let accessToken32 = await accessToken.replaceAll(`-`,``);
+  //console.log(accessToken.replace(/-/g, m  => !i++ ? m : ''));
+  console.log(accessToken.replace(/-/g,''));
+  //console.log(accessToken32);
+  //console.log(uuidv1());
+  //console.log(crypto(16).toString("hex"));
 }
