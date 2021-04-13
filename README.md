@@ -4,7 +4,7 @@ How to orchestrate multiple live events via the command line.
 
 ## Install
 
-based on ![Azure Media Services v3 Node samples](https://github.com/Azure-Samples/media-services-v3-node-tutorials)
+based on [Azure Media Services v3 Node samples](https://github.com/Azure-Samples/media-services-v3-node-tutorials) created by [John Deutscher](https://github.com/johndeu). 
 
 Clone from github
 
@@ -166,6 +166,6 @@ Note: When you restart the program, you need to associate it with a new asset an
 
 ## Usefull Links
 
-- ![Starting 2021 With the Latest and Greatest Features of Azure Video Indexer](https://techcommunity.microsoft.com/t5/azure-media-services/starting-2021-with-the-latest-and-greatest-features-of-azure/ba-p/2179152)
-- ![Media Services pricing](https://azure.microsoft.com/en-us/pricing/details/media-services/)
-- ![Stream-level events](https://docs.microsoft.com/en-us/azure/media-services/latest/monitoring/media-services-event-schemas#stream-level-events)
+- [Starting 2021 With the Latest and Greatest Features of Azure Video Indexer(starting-2021-with-the-latest-and-greatest-features-of-azure/ba-p/2179152)](https://techcommunity.microsoft.com/t5/azure-media-services/)
+- [Media Services pricing](https://azure.microsoft.com/en-us/pricing/details/media-services/)
+- [Stream-level events](https://docs.microsoft.com/en-us/azure/media-services/latest/monitoring/media-services-event-schemas#stream-level-events)
