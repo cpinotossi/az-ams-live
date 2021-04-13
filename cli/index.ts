@@ -4,7 +4,6 @@
 import * as msRestNodeAuth from "@azure/ms-rest-nodeauth";
 import { AzureMediaServices } from '@azure/arm-mediaservices';
 import { v4 as uuidv4 } from 'uuid';
-import { fromString as fsv4 } from 'uuidv4';
 import { AzureMediaServicesOptions, IPRange, LiveEvent, LiveEventInputAccessControl, LiveEventPreview, LiveOutput, MediaservicesGetResponse } from "@azure/arm-mediaservices/esm/models";
 
 // Load the .env file if it exists
@@ -22,12 +21,23 @@ const tenantDomain: string = process.env.AADTENANTDOMAIN as string;
 const subscriptionId: string = process.env.SUBSCRIPTIONID as string;
 const resourceGroup: string = process.env.RESOURCEGROUP as string;
 const accountName: string = process.env.ACCOUNTNAME as string;
+const maxStandbyLiveEvents: number = 3;
 
 export async function main() {
 
   const program = new Command()
     .name('amsCLI')
     .description('AMS CLI');
+
+  program.command('init') // sub-command name
+    .alias('in') // shortcut
+    .description('Set max standby AMS Live Events') // command description
+    // function to execute when command is uses
+    .action(function (path: String, cmdInstance: Command) {
+      let options = cmdInstance.opts();
+      let p = path;
+      setMaxStandbyLiveEvent();
+    });
 
   program.command('list') // sub-command name
     .alias('ls') // alternative sub-command is `ls`
@@ -42,13 +52,17 @@ export async function main() {
     .description('Change State of exisitng AMS Live Events') // command description
     .option('-n ,--name <type>', 'Live Event Name')
     .option('-s ,--state <type>', 'State')
+    .option('-a ,--all', 'Change the state of all Live Events')
     // function to execute when command is uses
     .action(function (path: String, cmdInstance: Command) {
       let options = cmdInstance.opts();
       let p = path;
-      console.log('%s %s', options.name, '/ ' + options.state);
-      stateLiveEvent(options.name, options.state);
-
+      console.log('%s %s', options.name, '/ ' + options.state, '/ ' + options.all);
+      if(options.all){
+        setStateLiveEventAll(options.state);
+      }else{
+        setStateLiveEvent(options.name, options.state);
+      }
     });
 
   program.command('create') // sub-command name
@@ -60,7 +74,7 @@ export async function main() {
     .action(function (path: String, cmdInstance: Command) {
       let options = cmdInstance.opts();
       let p = path;
-      console.log('%s %s %s', options.name, '/ ' + options.prefix);
+      console.log('%s %s', options.name, '/ ' + options.prefix);
       createLiveEvent(options.name, options.prefix);
 
     });
@@ -69,12 +83,17 @@ export async function main() {
     .alias('de') // shortcut
     .description('Delete AMS Live Events') // command description
     .option('-n ,--name <type>', 'Live Event Name')
+    .option('-a ,--all', 'Change the state of all Live Events')
     // function to execute when command is uses
     .action(function (path: String, cmdInstance: Command) {
       let options = cmdInstance.opts();
       let p = path;
-      console.log('%s', options.name);
-      deleteLiveEvent(options.name);
+      console.log('%s %s', options.name, options.all);
+      if(options.all){
+        deleteLiveEventAll();
+      }else{
+        deleteLiveEvent(options.name);
+      }
     });
 
   program.command('update') // sub-command name
@@ -104,15 +123,6 @@ main().catch((err) => {
 });
 
 async function listLiveEvent() {
-  // Copy the samples.env file and rename it to .env first, then populate it's values with the values obtained 
-  // from your Media Services account's API Access page in the Azure portal.
-  const clientId: string = process.env.AADCLIENTID as string;
-  const secret: string = process.env.AADSECRET as string;
-  const tenantDomain: string = process.env.AADTENANTDOMAIN as string;
-  const subscriptionId: string = process.env.SUBSCRIPTIONID as string;
-  const resourceGroup: string = process.env.RESOURCEGROUP as string;
-  const accountName: string = process.env.ACCOUNTNAME as string;
-
   let clientOptions: AzureMediaServicesOptions = {
     longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
   }
@@ -123,9 +133,9 @@ async function listLiveEvent() {
   // List Live Events
   var assets = await mediaClient.assets.list(resourceGroup, accountName);
   var liveEvents = await mediaClient.liveEvents.list(resourceGroup, accountName);
-  console.log('Name\t\t| State\t\t| Token')
+  console.log('Name\t\t| State\t\t| Prefix\t| Token')
   liveEvents.forEach(liveEvent => {
-    console.log('%s %s %s', liveEvent.name + '\t|', liveEvent.resourceState + '\t|', liveEvent.input.accessToken);
+    console.log('%s %s %s %s', liveEvent.name + '\t|', liveEvent.resourceState + '\t|', liveEvent.hostnamePrefix + '\t\t|', liveEvent.input.accessToken);
     //console.log("LiveEvent:"+ liveEvent.name+"\tStatus:"+liveEvent.resourceState)
   });
   /*
@@ -146,19 +156,20 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
     longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
   }
   const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
-  let mediaServicesClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
+  let mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
 
-  // Find the LiveEvent which does match to our input parameter current:
-  let liveEvent = await mediaServicesClient.liveEvents.get(
+  // Retrieve LiveEvent which does match to our input parameter current:
+  let liveEvent = await mediaClient.liveEvents.get(
     resourceGroup,
     accountName,
     liveEventNameCurrent
   );
 
-  let timeStart = process.hrtime();
-
+  // TODO: Need to change to Standby instead of Stop
   if (liveEvent.resourceState == "Running") {
-    let stopOperation = await mediaServicesClient.liveEvents.beginStop(
+    console.info(`Need to stop running Live Event %s`,liveEventNameCurrent );
+    let timeStartStop = process.hrtime();
+    let stopOperation = await mediaClient.liveEvents.beginStop(
       resourceGroup,
       accountName,
       liveEventNameCurrent,
@@ -169,19 +180,17 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
       }
     );
     await stopOperation.pollUntilFinished();
+    let timeEndStop = process.hrtime(timeStartStop);
+    console.info(`Execution time to Stop Live Event %s: %ds %dms`, liveEventNameCurrent, timeEndStop[0], timeEndStop[1] / 1000000);
   }
 
-  let timeEnd = process.hrtime(timeStart);
-  console.info(`Execution time for Stop Live Event: %ds %dms`, timeEnd[0], timeEnd[1] / 1000000);
-  console.log();
-
-  // Lets Modify the hostnamePrefix in Stopped state. 
+  // Modify hostnamePrefix in Stopped state. 
   // With the Channel stopped I should be able to update a few things as needed...
   liveEvent.input.accessToken = accessToken; //"0eebebb0-7ce8-42b7-954a-e3553e810379";
   // Assign the new live Event Name to the hostnamePrefix setting:
   liveEvent.hostnamePrefix = liveEventPrefix;
   // Calling update 
-  let liveEventUpdateOperation = await mediaServicesClient.liveEvents.beginUpdate(
+  let liveEventUpdateOperation = await mediaClient.liveEvents.beginUpdate(
     resourceGroup,
     accountName,
     liveEventNameCurrent,
@@ -190,9 +199,9 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   let updateresponse = await liveEventUpdateOperation.pollUntilFinished();
 
   console.log(`Starting the Live Event operation... please stand by`);
-  timeStart = process.hrtime();
+  let timeStartStart = process.hrtime();
   // Start the Live Event - this will take some time...
-  let liveEventStartOperation = await mediaServicesClient.liveEvents.beginStart(
+  let liveEventStartOperation = await mediaClient.liveEvents.beginStart(
     resourceGroup,
     accountName,
     liveEventNameCurrent
@@ -200,16 +209,17 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   console.log(`Live Event Start - HTTP Response Status: ${liveEventStartOperation.getInitialResponse().status}`);
   //console.log(liveEventStartOperation.getInitialResponse().parsedBody);
 
-  console.log(`The Live Event is being allocated. If the service's hotpool is completely depleted in a region, this could delay here for up to 15-30 minutes while machines are allocated.`)
-  console.log(`If this is taking a very long time, wait for at least 30 minutes and check on the status. If the code times out, or is cancelled, be sure to clean up in the portal!`)
+  //console.log(`The Live Event is being allocated. If the service's hotpool is completely depleted in a region, this could delay here for up to 15-30 minutes while machines are allocated.`)
+  //console.log(`If this is taking a very long time, wait for at least 30 minutes and check on the status. If the code times out, or is cancelled, be sure to clean up in the portal!`)
+
   // Poll until this long running operation has finished.
   let response = await liveEventStartOperation.pollUntilFinished();
-  timeEnd = process.hrtime(timeStart);
-  console.info(`Execution time for start Live Event: %ds %dms`, timeEnd[0], timeEnd[1] / 1000000);
-  console.log();
+  let timeEndStart = process.hrtime(timeStartStart);
+  console.info(`Execution time for start Live Event %s: %ds %dms`, liveEventNameCurrent, timeEndStart[0], timeEndStart[1] / 1000000);
+  //console.log();
 
   // Refresh the liveEvent object's settings after starting it...
-  liveEvent = await mediaServicesClient.liveEvents.get(
+  liveEvent = await mediaClient.liveEvents.get(
     resourceGroup,
     accountName,
     liveEventNameCurrent
@@ -220,10 +230,9 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
   // to get the primary secure RTMPS, it is usually going to be index 3, but you could add a  loop here to confirm...
   if (liveEvent.input?.endpoints) {
     let ingestUrl = liveEvent.input.endpoints[0].url;
-    console.log(`The RTMP ingest URL to enter into OBS Studio is:`);
-    console.log(`RTMP ingest : ${ingestUrl}`);
-    console.log(`Make sure to enter a Stream Key into the OBS studio settings. It can be any value or you can repeat the accessToken used in the ingest URL path.`);
-    console.log();
+    console.log(`Ingest url: ${ingestUrl}`);
+    //console.log(`Make sure to enter a Stream Key into the OBS studio settings. It can be any value or you can repeat the accessToken used in the ingest URL path.`);
+    //console.log();
   }
 
   if (liveEvent.preview?.endpoints) {
@@ -232,23 +241,33 @@ async function updateLiveEvent(liveEventNameCurrent: string, liveEventPrefix: st
     // The preview endpoint URL also support the addition of various format strings for HLS (format=m3u8-cmaf) and DASH (format=mpd-time-cmaf) for example.
     // The default manifest is Smooth. 
     let previewEndpoint = liveEvent.preview.endpoints[0].url;
-    console.log("The preview url is:");
-    console.log(previewEndpoint);
-    console.log();
-    console.log("Open the live preview in your browser and use any DASH or HLS player to monitor the preview playback:");
-    console.log(`https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
-    console.log("You will need to refresh the player page SEVERAL times until enough data has arrived to allow for manifest creation.");
-    console.log("In a production player, the player can inspect the manifest to see if it contains enough content for the player to load and auto reload.");
-    console.log();
+    console.log("Preview url is: " + previewEndpoint);
+    console.log("Preview via AMP: " + `https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
   }
 
   console.log("Start the live stream now, sending the input to the ingest url and verify that it is arriving with the preview url.");
   console.log("IMPORTANT TIP!: Make CERTAIN that the video is flowing to the Preview URL before continuing!");
   listLiveEvent();
+  console.log();
 }
 
+async function deleteLiveEventAll() {
+  // Retrieve an Azure Media Service instance
+  let clientOptions: AzureMediaServicesOptions = {
+    longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
+  }
+  const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
+  let mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
 
-async function deleteLiveEvent (liveEventName: string) {
+  var liveEvents = await mediaClient.liveEvents.list(resourceGroup, accountName);
+  liveEvents.forEach(liveEvent => {
+    if(liveEvent.name != null){
+      deleteLiveEvent(liveEvent.name);
+    }
+  });
+}
+
+async function deleteLiveEvent(liveEventName: string) {
   // Retrieve an Azure Media Service instance
   let clientOptions: AzureMediaServicesOptions = {
     longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
@@ -264,7 +283,7 @@ async function deleteLiveEvent (liveEventName: string) {
   console.log(`Starting the Live Event operation... please stand by`);
   let timeStart = process.hrtime();
   if (liveEvent.resourceState != "Stopping" && liveEvent.resourceState != "Stopped") {
-    await stateLiveEvent(liveEventName, "stop");
+    await setStateLiveEvent(liveEventName, "stop");
   }
   let deleteOperation = await mediaServicesClient.liveEvents.beginDeleteMethod(
     resourceGroup,
@@ -280,17 +299,42 @@ async function deleteLiveEvent (liveEventName: string) {
   let timeEnd = process.hrtime(timeStart);
   console.info(`Execution time to delete %s Live Event: %ds %dms`, liveEventName, timeEnd[0], timeEnd[1] / 1000000);
   console.log();
-  listLiveEvent();
+  await listLiveEvent();
+  console.log();
 }
 
-
-async function stateLiveEvent(liveEventNameCurrent: string, liveEventState: string) {
+async function setStateLiveEventAll(liveEventState: string) {
   // Retrieve an Azure Media Service instance
   let clientOptions: AzureMediaServicesOptions = {
     longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
   }
   const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
   let mediaServicesClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
+  let liveEvents = await mediaServicesClient.liveEvents.list(resourceGroup, accountName);
+  liveEvents.forEach(liveEvent => {
+    if (liveEventState == "start") {
+      if (liveEvent.resourceState != "Starting" && liveEvent.resourceState != "Running") {
+        setStateLiveEvent(<string>liveEvent.name, liveEventState);
+      }
+    } else if (liveEventState == "stop") {
+      if (liveEvent.resourceState != "Stopping" && liveEvent.resourceState != "Stopped") {
+        setStateLiveEvent(<string>liveEvent.name, liveEventState);
+      }
+    } else if (liveEventState == "standby") {
+      if (liveEvent.resourceState != "Allocating" && liveEvent.resourceState != "StandBy") {
+        setStateLiveEvent(<string>liveEvent.name, liveEventState);
+      }
+    }
+  });
+}
+
+async function setStateLiveEvent(liveEventName: string, liveEventState: string) {
+  // Retrieve an Azure Media Service instance
+  let clientOptions: AzureMediaServicesOptions = {
+    longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
+  }
+  const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
+  let mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
 
   let timeStart = process.hrtime();
   /*
@@ -299,10 +343,10 @@ async function stateLiveEvent(liveEventNameCurrent: string, liveEventState: stri
   */
   switch (liveEventState) {
     case "stop":
-      let stopOperation = await mediaServicesClient.liveEvents.beginStop(
+      let stopOperation = await mediaClient.liveEvents.beginStop(
         resourceGroup,
         accountName,
-        liveEventNameCurrent,
+        liveEventName,
         {
           // It can be faster to delete all live outputs first, and then delete the live event. 
           // if you have additional workflows on the archive to run. Speeds things up!
@@ -312,10 +356,10 @@ async function stateLiveEvent(liveEventNameCurrent: string, liveEventState: stri
       await stopOperation.pollUntilFinished();
       break;
     case "start":
-      let startOperation = await mediaServicesClient.liveEvents.beginStart(
+      let startOperation = await mediaClient.liveEvents.beginStart(
         resourceGroup,
         accountName,
-        liveEventNameCurrent,
+        liveEventName,
         {
           // It can be faster to delete all live outputs first, and then delete the live event. 
           // if you have additional workflows on the archive to run. Speeds things up!
@@ -325,10 +369,21 @@ async function stateLiveEvent(liveEventNameCurrent: string, liveEventState: stri
       await startOperation.pollUntilFinished();
       break;
     case "standby":
-      let standbyOperation = await mediaServicesClient.liveEvents.beginAllocate(
+      let stopOperation2 = await mediaClient.liveEvents.beginStop(
         resourceGroup,
         accountName,
-        liveEventNameCurrent,
+        liveEventName,
+        {
+          // It can be faster to delete all live outputs first, and then delete the live event. 
+          // if you have additional workflows on the archive to run. Speeds things up!
+          //removeOutputsOnStop :true // this is OPTIONAL, but recommend deleting them manually first. 
+        }
+      );
+      await stopOperation2.pollUntilFinished();
+      let standbyOperation = await mediaClient.liveEvents.beginAllocate(
+        resourceGroup,
+        accountName,
+        liveEventName,
         {
           // It can be faster to delete all live outputs first, and then delete the live event. 
           // if you have additional workflows on the archive to run. Speeds things up!
@@ -342,25 +397,56 @@ async function stateLiveEvent(liveEventNameCurrent: string, liveEventState: stri
       console.log(`Valid state values are start, stop, standby`);
   }
   let timeEnd = process.hrtime(timeStart);
-  console.info(`Execution time for %s Live Event: %ds %dms`, liveEventState, timeEnd[0], timeEnd[1] / 1000000);
+  console.info(`Execution time  of %s to state %s : %ds %dms`, liveEventName, liveEventState, timeEnd[0], timeEnd[1] / 1000000);
   console.log();
-  listLiveEvent();
+  await listLiveEvent();
+  console.log();
 }
 
+async function setMaxStandbyLiveEvent() {
+  //Init AzureMediaService Client
+  let clientOptions: AzureMediaServicesOptions = {
+    longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
+  }
+
+  const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
+  const mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
+
+  // Count all Live Events in state standby
+  let liveEvents = await mediaClient.liveEvents.list(resourceGroup, accountName);
+  let currentNumberofStandByLiveEvents: number = 0;
+  liveEvents.forEach(liveEvent => {
+    if (liveEvent.resourceState == "StandBy" || liveEvent.resourceState == "Allocating") {
+      currentNumberofStandByLiveEvents++;
+    }
+  });
+  console.log(`Current No of Standby LiveEvents: %s Max Number: %s`, currentNumberofStandByLiveEvents, maxStandbyLiveEvents);
+  //
+  if(currentNumberofStandByLiveEvents < maxStandbyLiveEvents){
+    let diffStandByLiveEvents = maxStandbyLiveEvents - currentNumberofStandByLiveEvents;
+    for(var i:number = 1; i<=diffStandByLiveEvents; i++){
+      let numberlabel = currentNumberofStandByLiveEvents + i;
+      console.log(`sbstream:`+ numberlabel + ` user:`+numberlabel)
+      await createLiveEvent(`sbstream`+numberlabel, `user`+numberlabel);
+      await setStateLiveEvent(`sbstream`+numberlabel,`standby`);
+   }
+  }
+  
+}
 
 async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
   // Create Access Token from Name
-  let accessToken = fsv4(liveEventName);
+  let accessToken = uuidv4();
   // Retrieve an Azure Media Service instance
   let clientOptions: AzureMediaServicesOptions = {
     longRunningOperationRetryTimeout: 5 // set the timeout for retries to 5 seconds
   }
   const creds = await msRestNodeAuth.loginWithServicePrincipalSecret(clientId, secret, tenantDomain);
-  let mediaServicesClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
+  let mediaClient = new AzureMediaServices(creds, subscriptionId, clientOptions);
 
   // Get the media services account object for information on the current location. 
   let mediaAccount: MediaservicesGetResponse;
-  mediaAccount = await mediaServicesClient.mediaservices.get(resourceGroup, accountName);
+  mediaAccount = await mediaClient.mediaservices.get(resourceGroup, accountName);
 
   // Define LiveEvent Config Objects
 
@@ -468,7 +554,7 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
   // you are ready to transition to "Running". This is useful when you want to pool resources in a warm "Standby" state at a reduced cost.
   // The transition from Standby to "Running" is much faster than cold creation to "Running" using the autostart property.
   // Returns a long running operation polling object that can be used to poll until completion.
-  let liveCreateOperation = await mediaServicesClient.liveEvents.beginCreate(
+  let liveCreateOperation = await mediaClient.liveEvents.beginCreate(
     resourceGroup,
     accountName,
     liveEventName,
@@ -483,17 +569,17 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
     }
   );
 
-  console.log(`Live Event Create : HTTP Response Status: ${liveCreateOperation.getInitialResponse().status}`);
-  console.log(liveCreateOperation.getInitialResponse().parsedBody);
+  //console.log(`Live Event Create : HTTP Response Status: ${liveCreateOperation.getInitialResponse().status}`);
+  //console.log(liveCreateOperation.getInitialResponse().parsedBody);
 
   // Make sure that the Live event is created
   if (!liveCreateOperation.isFinished()) {
     await liveCreateOperation.pollUntilFinished();
   }
   let timeEnd = process.hrtime(timeStart);
-  console.info(`Live Event Create : long running operation complete!`)
+  //console.info(`Live Event Create : long running operation complete!`)
   console.info(`Live Event Create : Execution time for create LiveEvent: %ds %dms`, timeEnd[0], timeEnd[1] / 1000000);
-  console.log();
+  //console.log();
 
   // Create an Asset for the LiveOutput to use. Think of this as the "tape" that will be recorded to. 
   // The asset entity points to a folder/container in your Azure Storage account. 
@@ -543,16 +629,16 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
   console.info(`Execution time for create Live Output: %ds %dms`, timeEnd[0], timeEnd[1] / 1000000);
   console.log();
   */
-  console.log(`Live Event Start: ... please stand by`);
+  //console.log(`Live Event Start: ... please stand by`);
   timeStart = process.hrtime();
   // Start the Live Event - this will take some time...
-  let liveEventStartOperation = await mediaServicesClient.liveEvents.beginStart(
+  let liveEventStartOperation = await mediaClient.liveEvents.beginStart(
     resourceGroup,
     accountName,
     liveEventName
   );
 
-  console.log(`Live Event Start: HTTP Response Status: ${liveEventStartOperation.getInitialResponse().status}`);
+  //console.log(`Live Event Start: HTTP Response Status: ${liveEventStartOperation.getInitialResponse().status}`);
   //console.log(liveEventStartOperation.getInitialResponse().parsedBody);
 
   //console.log(`The Live Event is being allocated. If the service's hotpool is completely depleted in a region, this could delay here for up to 15-30 minutes while machines are allocated.`)
@@ -561,10 +647,10 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
   let response = await liveEventStartOperation.pollUntilFinished();
   timeEnd = process.hrtime(timeStart);
   console.info(`Live Event Start: Execution time : %ds %dms`, timeEnd[0], timeEnd[1] / 1000000);
-  console.log();
+  //console.log();
 
   // Refresh the liveEvent object's settings after starting it...
-  let liveEvent = await mediaServicesClient.liveEvents.get(
+  let liveEvent = await mediaClient.liveEvents.get(
     resourceGroup,
     accountName,
     liveEventName
@@ -575,7 +661,7 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
   // to get the primary secure RTMPS, it is usually going to be index 3, but you could add a  loop here to confirm...
   if (liveEvent.input?.endpoints) {
     let ingestUrl = liveEvent.input.endpoints[0].url;
-    console.log(`OBS Studio RTMP ingest URL : ${ingestUrl}`);
+    console.log(`Ingest URL : ${ingestUrl}`);
   }
 
   if (liveEvent.preview?.endpoints) {
@@ -584,12 +670,9 @@ async function createLiveEvent(liveEventName: string, liveEventPrefix: string) {
     // The preview endpoint URL also support the addition of various format strings for HLS (format=m3u8-cmaf) and DASH (format=mpd-time-cmaf) for example.
     // The default manifest is Smooth. 
     let previewEndpoint = liveEvent.preview.endpoints[0].url;
-    console.log("Preview url is:");
-    console.log(previewEndpoint);
-    console.log();
-    console.log("Preview via AMP:");
-    console.log(`https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
-    console.log();
+    console.log("Preview url is: " + previewEndpoint);
+    console.log("Preview via AMP: " + `https://ampdemo.azureedge.net/?url=${previewEndpoint}(format=mpd-time-cmaf)&heuristicprofile=lowlatency`);
   }
   listLiveEvent();
+  console.log();
 }

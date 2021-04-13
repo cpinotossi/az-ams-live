@@ -32,6 +32,7 @@ Create LiveStream
 
 ~~~~pwsh
 PS C:\> npx ts-node .\cli\index.ts create -n stream001 -p userX
+
 ~~~~
 
 Delete LiveStream
